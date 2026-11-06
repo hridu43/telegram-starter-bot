@@ -1,5 +1,3 @@
-
-
 import { Keyboard } from "grammy"
 import fs from "node:fs/promises"
 
@@ -56,6 +54,57 @@ export function registerCommands(bot) {
     if (ctx.from.id !== ADMIN_ID) return
     const videos = await loadVideos()
     await ctx.reply(`মোট সেভ করা ভিডিও: ${videos.length}`)
+  })
+
+  // ভিডিও দেখার ও নির্দিষ্ট ভিডিও সরানোর কমান্ড
+  bot.command("remove", async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) return
+
+    const videos = await loadVideos()
+    const number = String(ctx.match || "").trim()
+
+    if (videos.length === 0) {
+      await ctx.reply("কোনো ভিডিও সেভ করা নেই।")
+      return
+    }
+
+    if (!number) {
+      await ctx.reply(
+        "যে ভিডিওটি সরাতে চাও, সেটি নম্বর দেখে নাও।\n\n" +
+        "সরাতে লিখবে: /remove 5"
+      )
+
+      for (let i = 0; i < videos.length; i++) {
+        try {
+          await ctx.api.sendVideo(ctx.chat.id, videos[i], {
+            caption: `ভিডিও নম্বর: ${i + 1}`
+          })
+        } catch (err) {
+          console.log("Preview error:", err.message)
+        }
+      }
+      return
+    }
+
+    if (!/^\d+$/.test(number)) {
+      await ctx.reply("সঠিক নম্বর দাও। যেমন: /remove 5")
+      return
+    }
+
+    const index = Number(number) - 1
+
+    if (index < 0 || index >= videos.length) {
+      await ctx.reply("এই নম্বরের কোনো ভিডিও নেই।")
+      return
+    }
+
+    videos.splice(index, 1)
+    await saveVideos(videos)
+
+    await ctx.reply(
+      `ভিডিও নম্বর ${number} সরানো হয়েছে।\n` +
+      `এখন মোট ভিডিও: ${videos.length}`
+    )
   })
 
   bot.hears("🎬 ডেমো", async (ctx) => {
