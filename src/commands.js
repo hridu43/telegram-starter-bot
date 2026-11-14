@@ -1,11 +1,14 @@
+
 import { Keyboard } from "grammy"
 import fs from "node:fs/promises"
 
 const ADMIN_ID = 8597790913
 const VIDEO_FILE = "./videos.json"
+const USER_FILE = "./users.json"
 
 const keyboard = new Keyboard()
   .text("🎬 ডেমো")
+  .text("📊 Statistics")
   .resized()
 
 const busyChats = new Set()
@@ -22,11 +25,83 @@ async function saveVideos(videos) {
   await fs.writeFile(VIDEO_FILE, JSON.stringify(videos))
 }
 
+// User statistics
+let userWriteQueue = Promise.resolve()
+
+async function loadUsers() {
+  try {
+    return JSON.parse(await fs.readFile(USER_FILE, "utf8"))
+  } catch {
+    return {}
+  }
+}
+
+async function recordUser(userId) {
+  userWriteQueue = userWriteQueue.then(async () => {
+    const users = await loadUsers()
+    const id = String(userId)
+    const now = new Date().toISOString()
+
+    if (!users[id]) {
+      users[id] = {
+        firstSeen: now,
+        lastActive: now
+      }
+    } else {
+      users[id].lastActive = now
+    }
+
+    await fs.writeFile(USER_FILE, JSON.stringify(users, null, 2))
+  })
+
+  try {
+    await userWriteQueue
+  } catch (err) {
+    console.log("User tracking error:", err.message)
+  }
+}
+
+async function getStatistics() {
+  const users = await loadUsers()
+  const allUsers = Object.values(users)
+  const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000
+
+  const monthlyUsers = allUsers.filter(user => {
+    return new Date(user.lastActive).getTime() >= thirtyDaysAgo
+  }).length
+
+  return {
+    total: allUsers.length,
+    monthly: monthlyUsers
+  }
+}
+
 export function registerCommands(bot) {
+
+  // Track unique users and their activity
+  bot.use(async (ctx, next) => {
+    if (ctx.from) {
+      await recordUser(ctx.from.id)
+    }
+    await next()
+  })
+
   bot.command("start", async (ctx) => {
     await ctx.reply("স্বাগতম! নিচের ডেমো বাটনে ক্লিক করো।", {
       reply_markup: keyboard,
     })
+  })
+
+  // Public statistics button
+  bot.hears("📊 Statistics", async (ctx) => {
+    const stats = await getStatistics()
+
+    await ctx.reply(
+      "📊 **Bot Statistics**\n\n" +
+      `👥 Total Users: ${stats.total}\n` +
+      `📅 Monthly Users: ${stats.monthly}`,
+      { parse_mode: "Markdown" }
+    )
   })
 
   async function addVideo(ctx, fileId) {
