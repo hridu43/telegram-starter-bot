@@ -5,6 +5,9 @@ import fs from "node:fs/promises"
 const ADMIN_ID = 8597790913
 const VIDEO_FILE = "./videos.json"
 const USER_FILE = "./users.json"
+const CLICK_FILE = "./clicks.json"
+
+const COOLDOWN = 2 * 60 * 1000
 
 const keyboard = new Keyboard()
   .text("🎬 ডেমো")
@@ -13,27 +16,31 @@ const keyboard = new Keyboard()
 
 const busyChats = new Set()
 
-async function loadVideos() {
+async function readJSON(file, fallback) {
   try {
-    return JSON.parse(await fs.readFile(VIDEO_FILE, "utf8"))
+    return JSON.parse(await fs.readFile(file, "utf8"))
   } catch {
-    return []
+    return fallback
   }
 }
 
+async function writeJSON(file, data) {
+  await fs.writeFile(file, JSON.stringify(data, null, 2))
+}
+
+async function loadVideos() {
+  return await readJSON(VIDEO_FILE, [])
+}
+
 async function saveVideos(videos) {
-  await fs.writeFile(VIDEO_FILE, JSON.stringify(videos))
+  await writeJSON(VIDEO_FILE, videos)
 }
 
 // User statistics
 let userWriteQueue = Promise.resolve()
 
 async function loadUsers() {
-  try {
-    return JSON.parse(await fs.readFile(USER_FILE, "utf8"))
-  } catch {
-    return {}
-  }
+  return await readJSON(USER_FILE, {})
 }
 
 async function recordUser(userId) {
@@ -51,7 +58,7 @@ async function recordUser(userId) {
       users[id].lastActive = now
     }
 
-    await fs.writeFile(USER_FILE, JSON.stringify(users, null, 2))
+    await writeJSON(USER_FILE, users)
   })
 
   try {
@@ -61,24 +68,71 @@ async function recordUser(userId) {
   }
 }
 
+// Demo click statistics
+let clickWriteQueue = Promise.resolve()
+
+async function loadClicks() {
+  return await readJSON(CLICK_FILE, {
+    total: 0,
+    users: {}
+  })
+}
+
+async function recordDemoClick(userId) {
+  clickWriteQueue = clickWriteQueue.then(async () => {
+    const data = await loadClicks()
+    const id = String(userId)
+    const now = Date.now()
+
+    if (!data.users[id]) {
+      data.users[id] = {
+        lastCounted: 0,
+        total: 0
+      }
+    }
+
+    const user = data.users[id]
+
+    if (now - user.lastCounted < COOLDOWN) {
+      return
+    }
+
+    user.lastCounted = now
+    user.total++
+    data.total++
+
+    await writeJSON(CLICK_FILE, data)
+  })
+
+  try {
+    await clickWriteQueue
+  } catch (err) {
+    console.log("Click tracking error:", err.message)
+  }
+}
+
 async function getStatistics() {
   const users = await loadUsers()
+  const clicks = await loadClicks()
+
   const allUsers = Object.values(users)
   const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000
 
-  const monthlyUsers = allUsers.filter(user => {
-    return new Date(user.lastActive).getTime() >= thirtyDaysAgo
-  }).length
+  const monthlyUsers = allUsers.filter(user =>
+    new Date(user.lastActive).getTime() >= thirtyDaysAgo
+  ).length
 
   return {
     total: allUsers.length,
-    monthly: monthlyUsers
+    monthly: monthlyUsers,
+    demoClicks: clicks.total,
+    uniqueClickers: Object.keys(clicks.users).length
   }
 }
 
 export function registerCommands(bot) {
 
-  // Track unique users and their activity
+  // Track users
   bot.use(async (ctx, next) => {
     if (ctx.from) {
       await recordUser(ctx.from.id)
@@ -87,19 +141,44 @@ export function registerCommands(bot) {
   })
 
   bot.command("start", async (ctx) => {
-    await ctx.reply("স্বাগতম! নিচের ডেমো বাটনে ক্লিক করো।", {
-      reply_markup: keyboard,
-    })
+    await ctx.reply(
+      "স্বাগতম! নিচের ডেমো বাটনে ক্লিক করো।",
+      { reply_markup: keyboard }
+    )
   })
 
-  // Public statistics button
-  bot.hears("📊 Statistics", async (ctx) => {
+  // Statistics: Admin only
+  bot.command("stats", async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) {
+      return ctx.reply("এই কমান্ড শুধু Admin ব্যবহার করতে পারবেন।")
+    }
+
     const stats = await getStatistics()
 
     await ctx.reply(
-      "📊 **Bot Statistics**\n\n" +
-      `👥 Total Users: ${stats.total}\n` +
-      `📅 Monthly Users: ${stats.monthly}`,
+      "📊 *Demo Bot Statistics*\n\n" +
+      `👥 মোট ইউজার: ${stats.total}\n` +
+      `📅 গত ৩০ দিনের ইউজার: ${stats.monthly}\n` +
+      `🎬 মোট গণনা করা ডেমো ক্লিক: ${stats.demoClicks}\n` +
+      `👤 ডেমো ব্যবহারকারী: ${stats.uniqueClickers}`,
+      { parse_mode: "Markdown" }
+    )
+  })
+
+  // Old Statistics button is private to Admin
+  bot.hears("📊 Statistics", async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) {
+      return ctx.reply("Statistics শুধু Admin দেখতে পারবেন।")
+    }
+
+    const stats = await getStatistics()
+
+    await ctx.reply(
+      "📊 *Demo Bot Statistics*\n\n" +
+      `👥 মোট ইউজার: ${stats.total}\n` +
+      `📅 গত ৩০ দিনের ইউজার: ${stats.monthly}\n` +
+      `🎬 মোট গণনা করা ডেমো ক্লিক: ${stats.demoClicks}\n` +
+      `👤 ডেমো ব্যবহারকারী: ${stats.uniqueClickers}`,
       { parse_mode: "Markdown" }
     )
   })
@@ -120,6 +199,7 @@ export function registerCommands(bot) {
 
   bot.on("message:document", async (ctx) => {
     const doc = ctx.message.document
+
     if (doc.mime_type?.startsWith("video/")) {
       await addVideo(ctx, doc.file_id)
     }
@@ -127,11 +207,12 @@ export function registerCommands(bot) {
 
   bot.command("count", async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return
+
     const videos = await loadVideos()
     await ctx.reply(`মোট সেভ করা ভিডিও: ${videos.length}`)
   })
 
-  // ভিডিও দেখার ও নির্দিষ্ট ভিডিও সরানোর কমান্ড
+  // Remove videos
   bot.command("remove", async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return
 
@@ -182,8 +263,12 @@ export function registerCommands(bot) {
     )
   })
 
+  // Demo button
   bot.hears("🎬 ডেমো", async (ctx) => {
     const chatId = ctx.chat.id
+
+    // Count once per user every two minutes
+    await recordDemoClick(ctx.from.id)
 
     if (busyChats.has(chatId)) return
 
@@ -205,7 +290,7 @@ export function registerCommands(bot) {
 
           setTimeout(() => {
             ctx.api.deleteMessage(chatId, sent.message_id)
-              .catch((err) => console.log("Delete error:", err.message))
+              .catch(err => console.log("Delete error:", err.message))
           }, 120000)
         } catch (err) {
           console.log("Video error:", err.message)
