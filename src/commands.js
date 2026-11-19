@@ -1,5 +1,5 @@
 
-import { Keyboard } from "grammy"
+import { Keyboard, InlineKeyboard } from "grammy"
 import fs from "node:fs/promises"
 
 const ADMIN_ID = 8597790913
@@ -15,6 +15,7 @@ const keyboard = new Keyboard()
   .resized()
 
 const busyChats = new Set()
+const pendingBroadcast = new Map()
 
 async function readJSON(file, fallback) {
   try {
@@ -44,28 +45,28 @@ async function loadUsers() {
 }
 
 async function recordUser(userId) {
-  userWriteQueue = userWriteQueue.then(async () => {
-    const users = await loadUsers()
-    const id = String(userId)
-    const now = new Date().toISOString()
+  userWriteQueue = userWriteQueue
+    .then(async () => {
+      const users = await loadUsers()
+      const id = String(userId)
+      const now = new Date().toISOString()
 
-    if (!users[id]) {
-      users[id] = {
-        firstSeen: now,
-        lastActive: now
+      if (!users[id]) {
+        users[id] = {
+          firstSeen: now,
+          lastActive: now
+        }
+      } else {
+        users[id].lastActive = now
       }
-    } else {
-      users[id].lastActive = now
-    }
 
-    await writeJSON(USER_FILE, users)
-  })
+      await writeJSON(USER_FILE, users)
+    })
+    .catch(err => {
+      console.log("User tracking error:", err.message)
+    })
 
-  try {
-    await userWriteQueue
-  } catch (err) {
-    console.log("User tracking error:", err.message)
-  }
+  await userWriteQueue
 }
 
 // Demo click statistics
@@ -79,36 +80,34 @@ async function loadClicks() {
 }
 
 async function recordDemoClick(userId) {
-  clickWriteQueue = clickWriteQueue.then(async () => {
-    const data = await loadClicks()
-    const id = String(userId)
-    const now = Date.now()
+  clickWriteQueue = clickWriteQueue
+    .then(async () => {
+      const data = await loadClicks()
+      const id = String(userId)
+      const now = Date.now()
 
-    if (!data.users[id]) {
-      data.users[id] = {
-        lastCounted: 0,
-        total: 0
+      if (!data.users[id]) {
+        data.users[id] = {
+          lastCounted: 0,
+          total: 0
+        }
       }
-    }
 
-    const user = data.users[id]
+      const user = data.users[id]
 
-    if (now - user.lastCounted < COOLDOWN) {
-      return
-    }
+      if (now - user.lastCounted < COOLDOWN) return
 
-    user.lastCounted = now
-    user.total++
-    data.total++
+      user.lastCounted = now
+      user.total++
+      data.total++
 
-    await writeJSON(CLICK_FILE, data)
-  })
+      await writeJSON(CLICK_FILE, data)
+    })
+    .catch(err => {
+      console.log("Click tracking error:", err.message)
+    })
 
-  try {
-    await clickWriteQueue
-  } catch (err) {
-    console.log("Click tracking error:", err.message)
-  }
+  await clickWriteQueue
 }
 
 async function getStatistics() {
@@ -132,11 +131,44 @@ async function getStatistics() {
 
 export function registerCommands(bot) {
 
-  // Track users
+  // Track users and capture Admin broadcast message
   bot.use(async (ctx, next) => {
     if (ctx.from) {
       await recordUser(ctx.from.id)
     }
+
+    if (
+      ctx.from?.id === ADMIN_ID &&
+      ctx.message &&
+      pendingBroadcast.has(String(ADMIN_ID))
+    ) {
+      const state = pendingBroadcast.get(String(ADMIN_ID))
+
+      if (state.awaiting) {
+        if (ctx.message.text === "/cancel") {
+          pendingBroadcast.delete(String(ADMIN_ID))
+          await ctx.reply("❌ Broadcast বাতিল করা হয়েছে।")
+          return
+        }
+
+        state.chatId = ctx.chat.id
+        state.messageId = ctx.message.message_id
+        state.awaiting = false
+
+        const confirmKeyboard = new InlineKeyboard()
+          .text("✅ সবাইকে পাঠাও", "broadcast:confirm")
+          .text("❌ বাতিল", "broadcast:cancel")
+
+        await ctx.reply(
+          "📢 তোমার মেসেজটি প্রস্তুত!\n\n" +
+          "উপরের মেসেজটি সব ব্যবহারকারীকে পাঠাতে চাইলে Confirm করো।",
+          { reply_markup: confirmKeyboard }
+        )
+
+        return
+      }
+    }
+
     await next()
   })
 
@@ -165,7 +197,6 @@ export function registerCommands(bot) {
     )
   })
 
-  // Old Statistics button is private to Admin
   bot.hears("📊 Statistics", async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) {
       return ctx.reply("Statistics শুধু Admin দেখতে পারবেন।")
@@ -181,6 +212,109 @@ export function registerCommands(bot) {
       `👤 ডেমো ব্যবহারকারী: ${stats.uniqueClickers}`,
       { parse_mode: "Markdown" }
     )
+  })
+
+  // Start broadcast
+  bot.command("broadcast", async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) {
+      return ctx.reply("এই কমান্ড শুধু Admin ব্যবহার করতে পারবেন।")
+    }
+
+    pendingBroadcast.set(String(ADMIN_ID), {
+      awaiting: true
+    })
+
+    await ctx.reply(
+      "📢 Broadcast Message\n\n" +
+      "এখন যে মেসেজটি সবাইকে পাঠাতে চাও সেটি পাঠাও।\n\n" +
+      "Text, ছবি, ভিডিও, অডিও, ভয়েস, PDF বা ফাইল পাঠাতে পারবে।\n\n" +
+      "বাতিল করতে /cancel লিখো।"
+    )
+  })
+
+  // Confirm broadcast
+  bot.callbackQuery("broadcast:confirm", async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) {
+      return ctx.answerCallbackQuery({
+        text: "শুধু Admin এটি করতে পারবেন।",
+        show_alert: true
+      })
+    }
+
+    const state = pendingBroadcast.get(String(ADMIN_ID))
+
+    if (!state || state.awaiting || !state.messageId) {
+      await ctx.answerCallbackQuery({
+        text: "কোনো Broadcast মেসেজ পাওয়া যায়নি।",
+        show_alert: true
+      })
+      return
+    }
+
+    pendingBroadcast.delete(String(ADMIN_ID))
+
+    await ctx.answerCallbackQuery({
+      text: "Broadcast শুরু হচ্ছে..."
+    })
+
+    await ctx.editMessageReplyMarkup({
+      reply_markup: new InlineKeyboard()
+    })
+
+    const users = await loadUsers()
+    const userIds = Object.keys(users)
+
+    let success = 0
+    let failed = 0
+
+    await ctx.reply(
+      `📢 Broadcast শুরু হয়েছে!\nমোট ব্যবহারকারী: ${userIds.length}`
+    )
+
+    for (const userId of userIds) {
+      try {
+        await ctx.api.copyMessage(
+          userId,
+          state.chatId,
+          state.messageId
+        )
+        success++
+      } catch (err) {
+        failed++
+        console.log(`Broadcast failed for ${userId}:`, err.message)
+      }
+
+      // Avoid sending messages too quickly
+      await new Promise(resolve => setTimeout(resolve, 40))
+    }
+
+    await ctx.reply(
+      "✅ Broadcast সম্পন্ন!\n\n" +
+      `👥 মোট ব্যবহারকারী: ${userIds.length}\n` +
+      `✅ সফলভাবে পাঠানো হয়েছে: ${success}\n` +
+      `❌ পাঠানো যায়নি: ${failed}`
+    )
+  })
+
+  // Cancel broadcast
+  bot.callbackQuery("broadcast:cancel", async (ctx) => {
+    if (ctx.from.id !== ADMIN_ID) {
+      return ctx.answerCallbackQuery({
+        text: "শুধু Admin এটি করতে পারবেন।"
+      })
+    }
+
+    pendingBroadcast.delete(String(ADMIN_ID))
+
+    await ctx.answerCallbackQuery({
+      text: "Broadcast বাতিল করা হয়েছে।"
+    })
+
+    await ctx.editMessageReplyMarkup({
+      reply_markup: new InlineKeyboard()
+    })
+
+    await ctx.reply("❌ Broadcast বাতিল করা হয়েছে।")
   })
 
   async function addVideo(ctx, fileId) {
@@ -267,7 +401,6 @@ export function registerCommands(bot) {
   bot.hears("🎬 ডেমো", async (ctx) => {
     const chatId = ctx.chat.id
 
-    // Count once per user every two minutes
     await recordDemoClick(ctx.from.id)
 
     if (busyChats.has(chatId)) return
