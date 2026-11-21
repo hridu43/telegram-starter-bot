@@ -110,6 +110,7 @@ async function recordDemoClick(userId) {
   await clickWriteQueue
 }
 
+// Statistics
 async function getStatistics() {
   const users = await loadUsers()
   const clicks = await loadClicks()
@@ -126,6 +127,57 @@ async function getStatistics() {
     monthly: monthlyUsers,
     demoClicks: clicks.total,
     uniqueClickers: Object.keys(clicks.users).length
+  }
+}
+
+// Send demo videos
+async function sendDemoVideos(ctx) {
+  const chatId = ctx.chat.id
+
+  if (busyChats.has(chatId)) {
+    await ctx.reply("⏳ আগের ডেমো ভিডিওগুলো পাঠানো হচ্ছে। একটু অপেক্ষা করো।")
+    return
+  }
+
+  const videos = await loadVideos()
+
+  if (videos.length === 0) {
+    await ctx.reply("এখনো কোনো ডেমো ভিডিও যোগ করা হয়নি।")
+    return
+  }
+
+  busyChats.add(chatId)
+
+  try {
+    await ctx.reply("🎬 ডেমো ভিডিও পাঠানো হচ্ছে...")
+
+    for (const fileId of videos) {
+      try {
+        const sent = await ctx.api.sendVideo(chatId, fileId)
+
+        setTimeout(() => {
+          ctx.api.deleteMessage(chatId, sent.message_id)
+            .catch(err => {
+              console.log("Delete error:", err.message)
+            })
+        }, 120000)
+
+      } catch (err) {
+        console.log("Video error:", err.message)
+      }
+    }
+
+    await ctx.reply(
+      "📌 *বিশেষ অনুরোধ*\n\n" +
+      "দয়া করে ভিডিওগুলো ফরওয়ার্ড করে রাখুন। " +
+      "২ মিনিট পর অটোমেটিক ভিডিও ডিলিট হয়ে যাবে।\n\n" +
+      "💎 গ্রুপের প্রিমিয়াম মেম্বারশিপের জন্য " +
+      "ইনবক্স করুন: @shahaa56",
+      { parse_mode: "Markdown" }
+    )
+
+  } finally {
+    busyChats.delete(chatId)
   }
 }
 
@@ -172,11 +224,16 @@ export function registerCommands(bot) {
     await next()
   })
 
+  // Start: Show keyboard and automatically send videos
   bot.command("start", async (ctx) => {
     await ctx.reply(
-      "স্বাগতম! নিচের ডেমো বাটনে ক্লিক করো।",
+      "স্বাগতম! ❤️\n\n" +
+      "তোমার জন্য ডেমো ভিডিও পাঠানো হচ্ছে।\n\n" +
+      "আবার দেখতে চাইলে নিচের 🎬 ডেমো বাটনে ক্লিক করো।",
       { reply_markup: keyboard }
     )
+
+    await sendDemoVideos(ctx)
   })
 
   // Statistics: Admin only
@@ -284,7 +341,6 @@ export function registerCommands(bot) {
         console.log(`Broadcast failed for ${userId}:`, err.message)
       }
 
-      // Avoid sending messages too quickly
       await new Promise(resolve => setTimeout(resolve, 40))
     }
 
@@ -317,6 +373,7 @@ export function registerCommands(bot) {
     await ctx.reply("❌ Broadcast বাতিল করা হয়েছে।")
   })
 
+  // Add video
   async function addVideo(ctx, fileId) {
     if (ctx.from.id !== ADMIN_ID) return
 
@@ -339,6 +396,7 @@ export function registerCommands(bot) {
     }
   })
 
+  // Count saved videos
   bot.command("count", async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return
 
@@ -397,49 +455,9 @@ export function registerCommands(bot) {
     )
   })
 
-  // Demo button
+  // Demo button: Send videos again
   bot.hears("🎬 ডেমো", async (ctx) => {
-    const chatId = ctx.chat.id
-
     await recordDemoClick(ctx.from.id)
-
-    if (busyChats.has(chatId)) return
-
-    const videos = await loadVideos()
-
-    if (videos.length === 0) {
-      await ctx.reply("এখনো কোনো ভিডিও যোগ করা হয়নি।")
-      return
-    }
-
-    busyChats.add(chatId)
-
-    try {
-      await ctx.reply("ডেমো ভিডিও পাঠানো হচ্ছে...")
-
-      for (const fileId of videos) {
-        try {
-          const sent = await ctx.api.sendVideo(chatId, fileId)
-
-          setTimeout(() => {
-            ctx.api.deleteMessage(chatId, sent.message_id)
-              .catch(err => console.log("Delete error:", err.message))
-          }, 120000)
-        } catch (err) {
-          console.log("Video error:", err.message)
-        }
-      }
-
-      await ctx.reply(
-        "📌 *বিশেষ অনুরোধ*\n\n" +
-        "দয়া করে ভিডিওগুলো ফরওয়ার্ড করে রাখুন। " +
-        "২ মিনিট পর অটোমেটিক ভিডিও ডিলিট হয়ে যাবে।\n\n" +
-        "💎 গ্রুপের প্রিমিয়াম মেম্বারশিপের জন্য " +
-        "ইনবক্স করুন: @shahaa56",
-        { parse_mode: "Markdown" }
-      )
-    } finally {
-      busyChats.delete(chatId)
-    }
+    await sendDemoVideos(ctx)
   })
 }
